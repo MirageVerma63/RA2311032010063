@@ -1,48 +1,33 @@
 # Notification System Design
 
----
-
 ## Stage 1
 
-### Overview
+A frontend developer asked me to design the REST API for the campus notification platform. Students should be able to see their notifications (placements, events, results) when they log in.
 
-This is the REST API contract for the campus notification platform. Students get notified about Placements, Events and Results when they log in.
+Here's what I came up with:
 
 ---
 
-### Authentication
-
-All endpoints require a Bearer token in the Authorization header.
-
+All API calls need an Authorization header like this:
 ```
 Authorization: Bearer <token>
 ```
 
 ---
 
-### Endpoints
-
-#### 1. Get All Notifications for a Student
-
+**Get notifications for a student**
 ```
 GET /api/notifications?studentId={studentId}
 ```
 
-**Headers:**
-```json
-{
-  "Authorization": "Bearer <token>"
-}
-```
-
-**Response (200):**
+Response:
 ```json
 {
   "notifications": [
     {
       "id": "uuid",
       "studentId": "RA2311032010063",
-      "title": "Placement Drive - TCS",
+      "title": "TCS Placement Drive",
       "message": "TCS is visiting campus on 10th May",
       "type": "Placement",
       "isRead": false,
@@ -54,145 +39,75 @@ GET /api/notifications?studentId={studentId}
 
 ---
 
-#### 2. Get Single Notification
-
+**Get a single notification**
 ```
 GET /api/notifications/:id
 ```
 
-**Response (200):**
-```json
-{
-  "id": "uuid",
-  "studentId": "RA2311032010063",
-  "title": "Mid Sem Results",
-  "message": "Your mid sem results are out",
-  "type": "Result",
-  "isRead": false,
-  "createdAt": "2026-04-22T17:51:30.000Z"
-}
-```
-
-**Response (404):**
+Response if not found:
 ```json
 { "error": "Notification not found" }
 ```
 
 ---
 
-#### 3. Create Notification
-
+**Create a notification**
 ```
 POST /api/notifications
 ```
 
-**Request Body:**
+Body:
 ```json
 {
   "studentId": "RA2311032010063",
-  "title": "Farewell Event",
+  "title": "Farewell",
   "message": "Farewell for 2022 batch on 5th May",
   "type": "Event"
 }
 ```
 
-**Response (201):**
-```json
-{
-  "id": "uuid",
-  "studentId": "RA2311032010063",
-  "title": "Farewell Event",
-  "message": "Farewell for 2022 batch on 5th May",
-  "type": "Event",
-  "isRead": false,
-  "createdAt": "2026-05-02T08:00:00.000Z"
-}
-```
-
 ---
 
-#### 4. Mark Notification as Read
-
+**Mark as read**
 ```
 PATCH /api/notifications/:id/read
 ```
 
-**Response (200):**
-```json
-{
-  "id": "uuid",
-  "isRead": true
-}
-```
-
 ---
 
-#### 5. Delete Notification
-
+**Delete a notification**
 ```
 DELETE /api/notifications/:id
 ```
 
-**Response (200):**
-```json
-{ "message": "Deleted successfully" }
-```
-
 ---
 
-#### 6. Get Priority Notifications (Top N)
-
+**Get top N priority notifications**
 ```
 GET /api/notifications/priority?n=10
 ```
 
-**Response (200):**
-```json
-{
-  "notifications": [
-    {
-      "id": "uuid",
-      "type": "Placement",
-      "title": "Google Hiring",
-      "isRead": false,
-      "createdAt": "2026-05-02T10:00:00.000Z"
-    }
-  ]
-}
-```
-
 ---
 
-### Real-Time Notifications
+**Real time notifications**
 
-For real-time delivery, the system uses **WebSockets** via Socket.IO.
+I went with WebSockets for this. When a student logs in, they connect to the socket server with their studentId. If a new notification comes in for them, the server pushes it directly to their connection. This way there's no need to keep refreshing or polling.
 
-- When a student logs in, their client connects to the WebSocket server using their studentId as a room identifier.
-- When a new notification is created for a student, the server emits it directly to that student's room.
-- If the student is offline, the notification is stored in the DB and delivered on next login.
+If the student is offline, the notification just sits in the DB and they get it next time they log in.
 
-**Socket Event:**
+Socket event looks like:
 ```
 Event: "new_notification"
-Payload: { id, title, message, type, createdAt }
+Data: { id, title, message, type, createdAt }
 ```
-
-This avoids polling and gives instant delivery without extra HTTP calls.
 
 ---
 
 ## Stage 2
 
-### Database Choice: PostgreSQL
+For the database I went with PostgreSQL. The notification data is pretty structured - we always know the fields ahead of time, and we need to filter and sort by multiple columns. PostgreSQL handles that well.
 
-PostgreSQL is chosen because:
-- Notifications have a fixed, predictable structure (studentId, type, message, isRead, timestamp)
-- We need reliable reads with filtering and sorting
-- It handles concurrent reads well with proper indexing
-
----
-
-### DB Schema
+**Schema:**
 
 ```sql
 CREATE TABLE students (
@@ -213,75 +128,52 @@ CREATE TABLE notifications (
 );
 ```
 
----
+**Queries for each API:**
 
-### SQL Queries for the REST APIs
-
-**Get all unread notifications for a student:**
+Get all unread for a student:
 ```sql
 SELECT * FROM notifications
 WHERE student_id = $1 AND is_read = false
 ORDER BY created_at DESC;
 ```
 
-**Get single notification:**
-```sql
-SELECT * FROM notifications WHERE id = $1;
-```
-
-**Create notification:**
+Create:
 ```sql
 INSERT INTO notifications (student_id, title, message, type)
 VALUES ($1, $2, $3, $4)
 RETURNING *;
 ```
 
-**Mark as read:**
+Mark as read:
 ```sql
 UPDATE notifications SET is_read = true WHERE id = $1 RETURNING *;
 ```
 
-**Delete notification:**
+Delete:
 ```sql
 DELETE FROM notifications WHERE id = $1;
 ```
 
----
+**Problems that will come up as data grows:**
 
-### Problems as Data Grows
+The main issue is that without proper indexes, every query will scan the whole table. With 50,000 students and millions of notifications that gets slow fast. Also storing old read notifications forever will bloat the table. Pagination is another thing that needs to be added since returning all notifications at once doesn't scale.
 
-| Problem | Impact |
-|--------|--------|
-| Full table scan on every query | Slow response for large datasets |
-| No index on `student_id` or `is_read` | DB reads every row unnecessarily |
-| Storing all old notifications forever | Table grows unbounded, queries degrade |
-| High read traffic on login | Too many DB hits at the same time |
-
-**Solutions:**
-- Add composite index on `(student_id, is_read, created_at)` for the most common query pattern
-- Archive or soft-delete old/read notifications older than 90 days
-- Add pagination to all list endpoints (`LIMIT` + `OFFSET` or cursor-based)
-- Use a read cache (Redis) to avoid hitting DB on every login
+Fix is to add proper indexes, paginate responses, and archive old data after a few months.
 
 ---
 
 ## Stage 3
 
-### Analyzing the Slow Query
-
-Original query:
+The slow query:
 ```sql
 SELECT * FROM notifications
 WHERE studentID = 1042 AND isRead = false
 ORDER BY createdAt DESC;
 ```
 
-**Why it is slow:**
-- With 5,000,000 rows and no index, the database does a full table scan for every request
-- `SELECT *` fetches all columns including large text fields not needed for the notification list
-- No `LIMIT` means all matching rows come back at once
+This is slow because there's no index on studentID or isRead, so the DB scans every single row in the table. With 5 million rows that's a problem. Also SELECT * is pulling all columns when we probably only need a few.
 
-**What to change:**
+Better version:
 ```sql
 SELECT id, title, message, type, created_at
 FROM notifications
@@ -290,31 +182,19 @@ ORDER BY created_at DESC
 LIMIT 20;
 ```
 
-**Add this index:**
+And add this index:
 ```sql
-CREATE INDEX idx_notifications_student_unread
+CREATE INDEX idx_student_unread
 ON notifications (student_id, is_read, created_at DESC);
 ```
 
-This index covers all three conditions in the query so the DB skips the full scan entirely.
+With this index the DB goes straight to the matching rows instead of scanning everything. Huge difference.
 
-**Estimated cost difference:**
-- Without index: O(n) scan over 5M rows
-- With index: O(log n) lookup, only matching rows fetched
+**Should we index every column?**
 
----
+No, that's not a good idea. Every index takes up disk space and slows down inserts and updates because all indexes need to be updated too. Only index the columns you actually filter or sort by.
 
-### Should we index every column?
-
-No. Adding an index on every column is wasteful:
-- Each index takes extra disk space
-- Every INSERT or UPDATE has to update all indexes, slowing writes
-- Only index columns that appear in WHERE, ORDER BY or JOIN conditions frequently
-
----
-
-### Query: Students who got a Placement notification in last 7 days
-
+**Find students who got a placement notification in last 7 days:**
 ```sql
 SELECT DISTINCT student_id
 FROM notifications
@@ -322,174 +202,72 @@ WHERE type = 'Placement'
   AND created_at >= NOW() - INTERVAL '7 days';
 ```
 
-Add this index to support it:
-```sql
-CREATE INDEX idx_notifications_type_date
-ON notifications (type, created_at DESC);
-```
-
 ---
 
 ## Stage 4
 
-### Problem
+The problem here is that every time a student opens the app, it hits the DB. At peak times with thousands of students logging in at once, the DB gets overwhelmed.
 
-Every page load triggers a DB query to fetch notifications for the student. At scale with thousands of simultaneous logins, the DB cannot keep up.
+A few things that can help:
 
----
+**Caching with Redis** - store each student's notifications in Redis for 60 seconds. Most students won't get new notifications every minute so this works fine. When a new notification is created, just clear that student's cache. Downside is data can be 60 seconds stale.
 
-### Solutions and Tradeoffs
+**Pagination** - instead of loading all notifications at once, load 10 or 20 at a time. Smaller queries, faster responses.
 
-**Option 1: Redis Cache**
+**WebSocket push** - stop fetching on page load entirely. Student loads once and then gets pushed updates. This is the cleanest solution but takes more work to set up.
 
-Store each student's notification list in Redis with a short TTL (e.g., 60 seconds).
-
-```
-Key: notifications:student:{studentId}
-Value: JSON array of notifications
-TTL: 60 seconds
-```
-
-- Reads hit Redis instead of DB
-- On write (new notification), invalidate that student's cache key
-- Tradeoff: Student might see stale data for up to 60 seconds. Acceptable for non-critical updates.
-
-**Option 2: Pagination**
-
-Instead of fetching all notifications on load, fetch only the first 10 or 20.
-
-```
-GET /api/notifications?studentId=X&page=1&limit=10
-```
-
-- Dramatically reduces data transferred per request
-- DB query is faster with LIMIT
-- Tradeoff: Client needs to handle pagination logic
-
-**Option 3: WebSocket Push**
-
-Stop fetching on page load entirely. Push new notifications to connected clients via WebSocket.
-
-- Client only fetches once on first login, then receives updates via socket
-- No repeated polling
-- Tradeoff: More complex server setup, need to manage socket connections
-
-**Recommended approach:** Use all three together — cache for read speed, pagination for data size, WebSockets for real-time updates.
+Honestly using all three together is the right move for production.
 
 ---
 
 ## Stage 5
 
-### Problem with the Original Implementation
-
+The original code does this for 50,000 students:
 ```
-function notify_all(student_ids: array, message: string):
-    for student_id in student_ids:
-        send_email(student_id, message)   # calls Email API
-        save_to_db(student_id, message)   # DB insert
-        push_to_app(student_id, message)  # real-time push
+for each student:
+    send_email()
+    save_to_db()
+    push_to_app()
 ```
 
-Issues:
-- Running this in a loop for 50,000 students blocks the server
-- If `send_email` fails midway (it failed for 200 students), the loop stops and those students get nothing
-- No retry mechanism for failures
-- Doing email + DB + push all synchronously is very slow
-- If the server restarts mid-loop, we lose track of progress
+Problems with this:
+- It runs one student at a time, very slow
+- If send_email fails halfway through, the remaining students get nothing
+- No way to retry failed emails
+- If server crashes midway, no way to know where it stopped
 
----
-
-### Redesigned Approach
-
-Use a **message queue (e.g., BullMQ with Redis or RabbitMQ)**:
+Better approach is to use a job queue like BullMQ. Instead of doing everything in the loop, just add jobs to the queue and let workers handle them:
 
 ```
-function notify_all(student_ids: array, message: string):
-    for student_id in student_ids:
-        enqueue_job("notification_job", { student_id, message })
+for each student:
+    add job to queue
+
+worker picks up job:
+    save_to_db()        <- do this first always
+    push_to_app()
+    try send_email()
+    if email fails: retry 3 times, then mark as failed
 ```
 
-Each worker then processes one job at a time:
-
-```
-worker.process("notification_job", async (job):
-    student_id = job.data.student_id
-    message = job.data.message
-
-    save_to_db(student_id, message)       # save first, always
-    push_to_app(student_id, message)      # real-time push
-
-    try:
-        send_email(student_id, message)
-    catch error:
-        log_error(student_id, error)
-        retry_job(job, max_retries=3)     # retry only email, not db write
-```
-
-**Should DB save and email happen together?**
-
-No. They should be separate steps:
-- DB save must always succeed first — it is the source of truth
-- Email is a side effect and can fail or be retried without affecting the DB record
-- Combining them in a transaction means a failed email rolls back the DB write, which is wrong
-
-**Revised Pseudocode:**
-
-```
-function notify_all(student_ids: array, message: string):
-    for student_id in student_ids:
-        enqueue("save_and_push", { student_id, message })
-        enqueue("send_email", { student_id, message })
-
-worker "save_and_push":
-    save_to_db(student_id, message)
-    push_to_app(student_id, message)
-
-worker "send_email":
-    try:
-        send_email(student_id, message)
-    catch:
-        retry up to 3 times with exponential backoff
-        if still failing: mark as failed in DB, alert admin
-```
-
-This way:
-- All 50,000 jobs are queued instantly
-- Workers process them in parallel
-- Email failures do not block DB writes
-- Failed jobs are retried automatically
-- The server can restart without losing jobs (queue is persistent)
+Should DB save and email happen together in a transaction? No. DB save should always go through. Email is just a side effect - if it fails we retry it separately. Rolling back the DB write because email failed would mean the student loses their notification entirely which is worse.
 
 ---
 
 ## Stage 6
 
-### Priority Inbox — Top N Notifications
+For the priority inbox I sorted notifications using two things - the type and how recent it is.
 
-**Approach:**
-
-Priority is calculated using two factors:
-1. **Type weight** — Placement (3) > Result (2) > Event (1)
-2. **Recency** — more recent notifications score higher within the same type
-
-**Sorting logic:**
+Placement is most important, then Result, then Event. Within the same type, newer ones come first.
 
 ```
-score = typeWeight[type] combined with timestamp
-sort descending by weight first, then by createdAt
-take first N results
+Placement = weight 3
+Result = weight 2
+Event = weight 1
+
+sort by weight first, then by timestamp
+take top N
 ```
 
-**How to handle new notifications coming in efficiently:**
+For handling new notifications coming in without re-sorting the whole list every time, a max-heap of size N works well. When a new notification arrives, compare it with the lowest priority item in the heap. If it's more important, swap it in. This keeps the top N updated in O(log N) time instead of re-sorting everything.
 
-Use a **max-heap (priority queue)** of size N.
-
-- When a new notification arrives, compare it with the smallest item in the heap
-- If it has higher priority, remove the smallest and insert the new one
-- This keeps the heap at size N at all times
-- Insertion cost: O(log N) per new notification
-- Much faster than re-sorting the full list every time
-
-**Implementation:** See `notification_app_be/src/services/notification.service.ts` — `fetchTopPriority()` function.
-
-The current implementation sorts unread notifications by weight and timestamp, then slices the top N. For production with streaming data, this would be replaced with a heap-based approach using a library like `heap-js`.
+The code for this is in `notification_app_be/src/services/notification.service.ts` in the `fetchTopPriority` function.
